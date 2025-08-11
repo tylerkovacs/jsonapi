@@ -62,8 +62,8 @@ var (
 //		 }
 //	 }
 //
-func MarshalPayload(w io.Writer, models interface{}) error {
-	payload, err := Marshal(models)
+func MarshalPayload(w io.Writer, models interface{}, useNumericIDs bool) error {
+	payload, err := Marshal(models, useNumericIDs)
 	if err != nil {
 		return err
 	}
@@ -74,7 +74,7 @@ func MarshalPayload(w io.Writer, models interface{}) error {
 // Marshal does the same as MarshalPayload except it just returns the payload
 // and doesn't write out results. Useful if you use your own JSON rendering
 // library.
-func Marshal(models interface{}) (Payloader, error) {
+func Marshal(models interface{}, useNumericIDs bool) (Payloader, error) {
 	switch vals := reflect.ValueOf(models); vals.Kind() {
 	case reflect.Slice:
 		m, err := convertToSliceInterface(&models)
@@ -82,7 +82,7 @@ func Marshal(models interface{}) (Payloader, error) {
 			return nil, err
 		}
 
-		payload, err := marshalMany(m)
+		payload, err := marshalMany(m, useNumericIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -105,7 +105,7 @@ func Marshal(models interface{}) (Payloader, error) {
 		if reflect.Indirect(vals).Kind() != reflect.Struct {
 			return nil, ErrUnexpectedType
 		}
-		return marshalOne(models)
+		return marshalOne(models, useNumericIDs)
 	default:
 		return nil, ErrUnexpectedType
 	}
@@ -118,8 +118,8 @@ func Marshal(models interface{}) (Payloader, error) {
 //
 // models interface{} should be either a struct pointer or a slice of struct
 // pointers.
-func MarshalPayloadWithoutIncluded(w io.Writer, model interface{}) error {
-	payload, err := Marshal(model)
+func MarshalPayloadWithoutIncluded(w io.Writer, model interface{}, useNumericIDs bool) error {
+	payload, err := Marshal(model, useNumericIDs)
 	if err != nil {
 		return err
 	}
@@ -131,10 +131,10 @@ func MarshalPayloadWithoutIncluded(w io.Writer, model interface{}) error {
 // marshalOne does the same as MarshalOnePayload except it just returns the
 // payload and doesn't write out results. Useful is you use your JSON rendering
 // library.
-func marshalOne(model interface{}) (*OnePayload, error) {
+func marshalOne(model interface{}, useNumericIDs bool) (*OnePayload, error) {
 	included := make(map[string]*Node)
 
-	rootNode, err := visitModelNode(model, &included, true)
+	rootNode, err := visitModelNode(model, &included, true, useNumericIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -148,14 +148,14 @@ func marshalOne(model interface{}) (*OnePayload, error) {
 // marshalMany does the same as MarshalManyPayload except it just returns the
 // payload and doesn't write out results. Useful is you use your JSON rendering
 // library.
-func marshalMany(models []interface{}) (*ManyPayload, error) {
+func marshalMany(models []interface{}, useNumericIDs bool) (*ManyPayload, error) {
 	payload := &ManyPayload{
 		Data: []*Node{},
 	}
 	included := map[string]*Node{}
 
 	for _, model := range models {
-		node, err := visitModelNode(model, &included, true)
+		node, err := visitModelNode(model, &included, true, useNumericIDs)
 		if err != nil {
 			return nil, err
 		}
@@ -181,8 +181,8 @@ func marshalMany(models []interface{}) (*ManyPayload, error) {
 // this method is intended for.
 //
 // model interface{} should be a pointer to a struct.
-func MarshalOnePayloadEmbedded(w io.Writer, model interface{}) error {
-	rootNode, err := visitModelNode(model, nil, false)
+func MarshalOnePayloadEmbedded(w io.Writer, model interface{}, useNumericIDs bool) error {
+	rootNode, err := visitModelNode(model, nil, false, useNumericIDs)
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func MarshalOnePayloadEmbedded(w io.Writer, model interface{}) error {
 }
 
 func visitModelNode(model interface{}, included *map[string]*Node,
-	sideload bool) (*Node, error) {
+	sideload bool, useNumericIDs bool) (*Node, error) {
 	node := new(Node)
 
 	var er error
@@ -242,38 +242,66 @@ func visitModelNode(model interface{}, included *map[string]*Node,
 				kind = fieldType.Type.Kind()
 			}
 
-			// Handle allowed types
-			switch kind {
-			case reflect.String:
-				node.ID = v.Interface().(string)
-			case reflect.Int:
-				node.ID = strconv.FormatInt(int64(v.Interface().(int)), 10)
-			case reflect.Int8:
-				node.ID = strconv.FormatInt(int64(v.Interface().(int8)), 10)
-			case reflect.Int16:
-				node.ID = strconv.FormatInt(int64(v.Interface().(int16)), 10)
-			case reflect.Int32:
-				node.ID = strconv.FormatInt(int64(v.Interface().(int32)), 10)
-			case reflect.Int64:
-				node.ID = strconv.FormatInt(v.Interface().(int64), 10)
-			case reflect.Uint:
-				node.ID = strconv.FormatUint(uint64(v.Interface().(uint)), 10)
-			case reflect.Uint8:
-				node.ID = strconv.FormatUint(uint64(v.Interface().(uint8)), 10)
-			case reflect.Uint16:
-				node.ID = strconv.FormatUint(uint64(v.Interface().(uint16)), 10)
-			case reflect.Uint32:
-				node.ID = strconv.FormatUint(uint64(v.Interface().(uint32)), 10)
-			case reflect.Uint64:
-				node.ID = strconv.FormatUint(v.Interface().(uint64), 10)
-			default:
-				// We had a JSON float (numeric), but our field was not one of the
-				// allowed numeric types
-				er = ErrBadJSONAPIID
-			}
+			// Do not set the ID to the zero-value since many APIs return an error when set (e.g., during POSTs to create resources)
+			// "ID Attribute Not Permitted Cannot create a resource with client-generated ID."
+			if !v.IsZero() {
 
-			if er != nil {
-				break
+				if !useNumericIDs {
+					// Handle allowed types
+					switch kind {
+					case reflect.String:
+						node.ID = v.Interface().(string)
+					case reflect.Int:
+						node.ID = strconv.FormatInt(int64(v.Interface().(int)), 10)
+					case reflect.Int8:
+						node.ID = strconv.FormatInt(int64(v.Interface().(int8)), 10)
+					case reflect.Int16:
+						node.ID = strconv.FormatInt(int64(v.Interface().(int16)), 10)
+					case reflect.Int32:
+						node.ID = strconv.FormatInt(int64(v.Interface().(int32)), 10)
+					case reflect.Int64:
+						node.ID = strconv.FormatInt(v.Interface().(int64), 10)
+					case reflect.Uint:
+						node.ID = strconv.FormatUint(uint64(v.Interface().(uint)), 10)
+					case reflect.Uint8:
+						node.ID = strconv.FormatUint(uint64(v.Interface().(uint8)), 10)
+					case reflect.Uint16:
+						node.ID = strconv.FormatUint(uint64(v.Interface().(uint16)), 10)
+					case reflect.Uint32:
+						node.ID = strconv.FormatUint(uint64(v.Interface().(uint32)), 10)
+					case reflect.Uint64:
+						node.ID = strconv.FormatUint(v.Interface().(uint64), 10)
+					default:
+						// We had a JSON float (numeric), but our field was not one of the
+						// allowed numeric types
+						er = ErrBadJSONAPIID
+					}
+				} else {
+					// Handle allowed types
+					switch kind {
+					case reflect.Int,
+						reflect.Int8,
+						reflect.Int16,
+						reflect.Int32,
+						reflect.Int64,
+						reflect.Uint,
+						reflect.Uint8,
+						reflect.Uint16,
+						reflect.Uint32,
+						reflect.Uint64,
+						reflect.Float32,
+						reflect.Float64:
+						node.ID = v.Interface()
+					default:
+						// We had a JSON float (numeric), but our field was not one of the
+						// allowed numeric types
+						er = ErrBadJSONAPIID
+					}
+				}
+
+				if er != nil {
+					break
+				}
 			}
 
 			node.Type = args[1]
@@ -283,7 +311,7 @@ func visitModelNode(model interface{}, included *map[string]*Node,
 				node.ClientID = clientID
 			}
 		} else if annotation == annotationAttribute {
-			var omitEmpty, iso8601, rfc3339 bool
+			var omitEmpty, iso8601 bool
 
 			if len(args) > 2 {
 				for _, arg := range args[2:] {
@@ -292,8 +320,6 @@ func visitModelNode(model interface{}, included *map[string]*Node,
 						omitEmpty = true
 					case annotationISO8601:
 						iso8601 = true
-					case annotationRFC3339:
-						rfc3339 = true
 					}
 				}
 			}
@@ -311,8 +337,6 @@ func visitModelNode(model interface{}, included *map[string]*Node,
 
 				if iso8601 {
 					node.Attributes[args[1]] = t.UTC().Format(iso8601TimeFormat)
-				} else if rfc3339 {
-					node.Attributes[args[1]] = t.UTC().Format(time.RFC3339)
 				} else {
 					node.Attributes[args[1]] = t.Unix()
 				}
@@ -333,8 +357,6 @@ func visitModelNode(model interface{}, included *map[string]*Node,
 
 					if iso8601 {
 						node.Attributes[args[1]] = tm.UTC().Format(iso8601TimeFormat)
-					} else if rfc3339 {
-						node.Attributes[args[1]] = tm.UTC().Format(time.RFC3339)
 					} else {
 						node.Attributes[args[1]] = tm.Unix()
 					}
@@ -390,6 +412,7 @@ func visitModelNode(model interface{}, included *map[string]*Node,
 					fieldValue,
 					included,
 					sideload,
+					useNumericIDs,
 				)
 				if err != nil {
 					er = err
@@ -426,6 +449,7 @@ func visitModelNode(model interface{}, included *map[string]*Node,
 					fieldValue.Interface(),
 					included,
 					sideload,
+					useNumericIDs,
 				)
 				if err != nil {
 					er = err
@@ -481,13 +505,13 @@ func toShallowNode(node *Node) *Node {
 }
 
 func visitModelNodeRelationships(models reflect.Value, included *map[string]*Node,
-	sideload bool) (*RelationshipManyNode, error) {
+	sideload bool, useNumericIDs bool) (*RelationshipManyNode, error) {
 	nodes := []*Node{}
 
 	for i := 0; i < models.Len(); i++ {
 		n := models.Index(i).Interface()
 
-		node, err := visitModelNode(n, included, sideload)
+		node, err := visitModelNode(n, included, sideload, useNumericIDs)
 		if err != nil {
 			return nil, err
 		}
